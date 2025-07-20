@@ -1,0 +1,255 @@
+@page "/group-actions"
+@using Microsoft.AspNetCore.SignalR.Client
+@implements IAsyncDisposable
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Group Actions</PageTitle>
+
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-md-4">
+            <div class="card">
+                <div class="card-header">
+                    <h4>Join a Group</h4>
+                </div>
+                <div class="card-body">
+                    @if (!IsConnected)
+                    {
+                        <div class="mb-3">
+                            <label for="userName" class="form-label">Your Name:</label>
+                            <input type="text" @bind="userName" class="form-control" id="userName" placeholder="Enter your name" />
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="groupSelect" class="form-label">Select Group:</label>
+                            <select @bind="selectedGroup" class="form-select" id="groupSelect">
+                                <option value="">-- Choose a group --</option>
+                                @foreach (var group in availableGroups)
+                                {
+                                    <option value="@group">@group</option>
+                                }
+                            </select>
+                        </div>
+
+                        <button class="btn btn-primary" @onclick="ConnectAndJoinGroup" disabled="@(string.IsNullOrWhiteSpace(userName) || string.IsNullOrWhiteSpace(selectedGroup))">
+                            Connect & Join Group
+                        </button>
+                    }
+                    else
+                    {
+                        <div class="alert alert-success">
+                            <strong>Connected!</strong><br />
+                            User: @userName<br />
+                            Group: @currentGroup
+                        </div>
+
+                        <button class="btn btn-danger" @onclick="Disconnect">
+                            Leave Group
+                        </button>
+                    }
+                </div>
+            </div>
+
+            @if (IsConnected)
+            {
+                <div class="card mt-3">
+                    <div class="card-header">
+                        <h4>Actions</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="d-grid gap-2">
+                            @for (int i = 1; i <= 5; i++)
+                            {
+                                int actionNumber = i;
+                                <button class="btn btn-outline-primary" @onclick="@(() => SendAction("Action " + actionNumber))">
+                                    Action @actionNumber
+                                </button>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header">
+                    <h4>Group Activity Feed</h4>
+                    @if (IsConnected)
+                    {
+                        <small class="text-muted">Group: @currentGroup</small>
+                    }
+                </div>
+                <div class="card-body">
+                    <div class="activity-feed" style="height: 400px; overflow-y: auto; border: 1px solid #dee2e6; padding: 10px; background-color: #f8f9fa;">
+                        @if (messages.Any())
+                        {
+                            @foreach (var message in messages)
+                            {
+                                <div class="message-item mb-2 p-2 bg-white rounded border-start border-primary border-3">
+                                    <small class="text-muted">@message.Timestamp.ToString("HH:mm:ss")</small><br />
+                                    @message.Content
+                                </div>
+                            }
+                        }
+                        else
+                        {
+                            <div class="text-muted text-center">
+                                <em>No messages yet. Join a group to see activity!</em>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private HubConnection? hubConnection;
+
+    private string userName = string.Empty;
+    private string selectedGroup = string.Empty;
+    private string currentGroup = string.Empty;
+
+    private List<string> availableGroups = new();
+
+    private List<ActivityMessage> messages = new();
+
+    public bool IsConnected =>
+        hubConnection?.State == HubConnectionState.Connected;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await SetupSignalRConnection();
+        await LoadAvailableGroups();
+    }
+
+    private async Task SetupSignalRConnection()
+    {
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl("https://localhost:7205/grouphub")
+            .Build();
+
+        hubConnection.On<string>("UserJoined", (message) =>
+        {
+            AddMessage(message, "success");
+            InvokeAsync(StateHasChanged);
+        });
+
+        hubConnection.On<string>("ActionPerformed", (message) =>
+        {
+            AddMessage(message, "info");
+            InvokeAsync(StateHasChanged);
+        });
+
+        hubConnection.On<string>("UserLeft", (message) =>
+        {
+            AddMessage(message, "warning");
+            InvokeAsync(StateHasChanged);
+        });
+
+        hubConnection.On<string>("Error", (error) =>
+        {
+            AddMessage($"Error: {error}", "danger");
+            InvokeAsync(StateHasChanged);
+        });
+    }
+
+    private async Task LoadAvailableGroups()
+    {
+        try
+        {
+            if (hubConnection?.State != HubConnectionState.Connected)
+            {
+                await hubConnection!.StartAsync();
+            }
+
+            availableGroups = await hubConnection.InvokeAsync<List<string>>("GetGroups");
+            await hubConnection.StopAsync();
+        }
+        catch (Exception ex)
+        {
+            AddMessage($"Failed to load groups: {ex.Message}", "danger");
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task ConnectAndJoinGroup()
+    {
+        try
+        {
+            await hubConnection!.StartAsync();
+            await hubConnection.SendAsync("JoinGroup", selectedGroup, userName);
+            
+            currentGroup = selectedGroup;
+            AddMessage($"You joined {currentGroup}", "success");
+        }
+        catch (Exception ex)
+        {
+            AddMessage($"Connection failed: {ex.Message}", "danger");
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task SendAction(string actionName)
+    {
+        if (IsConnected)
+        {
+            try
+            {
+                await hubConnection!.SendAsync("SendAction", currentGroup, userName, actionName);
+            }
+            catch (Exception ex)
+            {
+                AddMessage($"Failed to send action: {ex.Message}", "danger");
+            }
+        }
+    }
+
+    private async Task Disconnect()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.DisposeAsync();
+            await SetupSignalRConnection();
+        }
+
+        currentGroup = string.Empty;
+        selectedGroup = string.Empty;
+        messages.Clear();
+        StateHasChanged();
+    }
+
+    private void AddMessage(string content, string type = "info")
+    {
+        messages.Add(new ActivityMessage
+        {
+            Content = content,
+            Timestamp = DateTime.Now,
+            Type = type
+        });
+
+        if (messages.Count > 50)
+        {
+            messages.RemoveAt(0);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.DisposeAsync();
+        }
+    }
+
+    private class ActivityMessage
+    {
+        public string Content { get; set; } = string.Empty;
+        public DateTime Timestamp { get; set; }
+        public string Type { get; set; } = "info";
+    }
+} 
